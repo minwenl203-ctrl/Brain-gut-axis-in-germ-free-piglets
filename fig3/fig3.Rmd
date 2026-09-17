@@ -1,0 +1,123 @@
+---
+title: "Figure 3. Differential expression analysis (MMT_D30 vs GF_D30) and volcano plots per tissue."
+date: "2026/9/16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# Clean workspace
+rm(list=ls())
+# Load setting and functions
+source("../script/stat_plot_functions.R")
+# Set output directory
+output_dir <- "./"
+```
+
+(a) Differential expression analysis comparing MMT_D30 against GF_D30 within each cell type (`subtype`) of every brain tissue, using Seurat `FindMarkers` (Wilcoxon test, min.pct = 0.25, logfc.threshold = 0.25). Results are written to `MMT_D30_vs_GF_D30_<Tissue>_all_DEGs.csv` (FDR-adjusted p-value < 0.05). (b) Volcano plots of significant DEGs (|avg_log2FC| >= 0.25, p_val < 0.05) for the glial cell types Oligodendrocytes, Microglia and Astrocytes in each tissue, drawn with scMarkerViz::marker_effect_plot.
+
+## a. Differential expression analysis
+
+```{r DEA, echo=TRUE}
+library(Seurat)
+library(dplyr)
+
+scobj <- readRDS("Brain.rds")  # adjust to your input file path
+
+stopifnot(all(c("subtype", "group", "Tissue") %in% colnames(scobj@meta.data)))
+
+scobj$Tissue_label <- as.character(scobj$Tissue)
+Tissues <- sort(unique(na.omit(scobj$Tissue_label)))
+
+all_de_results <- list()
+Tissue_de_results <- list()
+
+for (current_Tissue in Tissues) {
+  Tissue_obj <- subset(scobj, subset = Tissue_label == current_Tissue)
+  subtypes <- sort(unique(na.omit(as.character(Tissue_obj$subtype))))
+  ct_to_num <- setNames(seq_along(subtypes), subtypes)
+  Tissue_result_list <- list()
+
+  for (ct in subtypes) {
+    subset_obj <- subset(Tissue_obj, subset = subtype == ct)
+    valid_groups <- na.omit(unique(as.character(subset_obj$group)))
+    if (!all(c("MMT_D30", "GF_D30") %in% valid_groups)) next
+
+    Idents(subset_obj) <- "group"
+
+    de_res <- tryCatch({
+      FindMarkers(subset_obj, ident.1 = "MMT_D30", ident.2 = "GF_D30", test.use = "wilcox", min.pct = 0.25, logfc.threshold = 0.25)
+    }, error = function(e) NULL)
+    if (is.null(de_res) || nrow(de_res) == 0) next
+
+    de_res$gene <- rownames(de_res)
+    de_res$Tissue <- current_Tissue
+    de_res$cluster <- ct_to_num[ct]
+    de_res$celltype <- ct
+    de_res$direction <- ifelse(de_res$avg_log2FC > 0, "up_in_MMT_D30", "up_in_GF_D30")
+    de_res <- de_res[, c("gene", "Tissue", "cluster", "celltype", "direction", setdiff(colnames(de_res), c("gene", "Tissue", "cluster", "celltype", "direction"))), drop = FALSE]
+
+    all_de_results[[paste(current_Tissue, ct, sep = "__")]] <- de_res
+    Tissue_result_list[[ct]] <- de_res
+  }
+
+  if (length(Tissue_result_list) > 0) {
+    Tissue_de_results[[current_Tissue]] <- bind_rows(Tissue_result_list)
+  }
+}
+
+if (length(all_de_results) > 0) {
+  all_de_combined <- bind_rows(all_de_results)
+  all_de_combined$direction <- factor(all_de_combined$direction, levels = c("up_in_MMT_D30", "up_in_GF_D30"))
+  write.csv(all_de_combined, file.path(output_dir, "MMT_D30_vs_GF_D30_all_markers.csv"), row.names = FALSE)
+
+  for (current_Tissue in names(Tissue_de_results)) {
+    Tissue_de <- Tissue_de_results[[current_Tissue]] %>% filter(p_val_adj < 0.05)
+    if (nrow(Tissue_de) > 0) {
+      filename <- paste0("MMT_D30_vs_GF_D30_", current_Tissue, "_all_DEGs.csv")
+      write.csv(Tissue_de, file.path(output_dir, filename), row.names = FALSE)
+    }
+  }
+}
+```
+
+## b. Volcano plots per tissue
+
+```{r volcano, echo=TRUE, results='asis'}
+library(scMarkerViz)
+library(ggplot2)
+library(dplyr)
+
+fc_cutoff <- 0.25    # |log2FC| threshold
+pval_cutoff <- 0.05  # p-value threshold
+
+plot_files <- list.files(path = output_dir, pattern = 'all_DEGs\\.csv$', full.names = FALSE)
+
+for (csv_name in plot_files) {
+  csv_path <- file.path(output_dir, csv_name)
+  if (!file.exists(csv_path)) next
+
+  mydata <- read.csv(csv_path)
+  if (nrow(mydata) == 0) next
+  if (!"celltype" %in% colnames(mydata)) next  # skip files without a celltype column
+
+  plot_data <- subset(mydata, !is.na(celltype) & abs(avg_log2FC) >= fc_cutoff & p_val < pval_cutoff)
+  plot_data <- subset(plot_data, celltype %in% names(celltype_cols))
+  if (nrow(plot_data) == 0) next
+
+  celltype_levels <- sort(unique(plot_data$celltype))
+
+  # Map cell type names to colors; fill missing ones automatically
+  tile_cols <- setNames(celltype_cols[celltype_levels], celltype_levels)
+  na_cols <- is.na(tile_cols)
+  if (any(na_cols)) tile_cols[na_cols] <- scales::hue_pal()(sum(na_cols))
+
+  # Markdown section header for the current tissue
+  cat("\n##", sub('_all_DEGs\\.csv$', '', csv_name), "\n\n")
+
+  p <- marker_effect_plot(data = plot_data, group = "celltype", group_order = celltype_levels, group_label_size = 3, group_palette = tile_cols, effect_cutoff = fc_cutoff, significance_cutoff = pval_cutoff, significance_by = "p_value", show = "all", color_by = "direction", palette = c(down = '#835ac0ff', up = '#e1b85fff'), label = "top", label_n = 3, label_by = "effect", point_size = 0.5, point_alpha = 1, layout = "horizontal") +
+    ggplot2::ylab("avg_log2FC")
+
+  print(p)
+}
+```

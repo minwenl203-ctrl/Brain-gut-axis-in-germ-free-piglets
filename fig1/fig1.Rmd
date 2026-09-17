@@ -1,0 +1,116 @@
+---
+title: "Figure 1. Cell type correlation of brain single-cell RNA-seq data."
+date: "2026/9/16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# Clean workspace
+rm(list=ls())
+# Load setting and functions
+source("../script/stat_plot_functions.R")
+# Set output directory
+output_dir <- "./"
+```
+
+(a-d) Pairwise correlation of average gene expression between cell types. Average expression was computed from the log1p-normalized RNA data (`slot = "data"`) grouped by `manual_celltype`, and genes with maximum average expression <= 0.1 across cell types were removed before calculating Pearson (a, b) and Spearman (c, d) correlation coefficients. (a, c) Mixed plots with circle in the upper triangle and numeric values in the lower triangle; (b, d) clustered heatmaps with hierarchical clustering of rows and columns.
+
+```{r celltype_corr, echo=TRUE}
+library(Seurat)
+library(corrplot)
+library(pheatmap)
+library(dplyr)
+
+# 1. Load data
+brain_ileum <- readRDS("06_manual_annotate/Brain_new.rds")  # adjust to your input file path
+
+# 2. Average expression per cell type (log1p-normalized data)
+avg_exp <- AverageExpression(brain_ileum,
+                             assays = "RNA",
+                             slot = "data",      # normalized and log1p-transformed
+                             group.by = "manual_celltype",
+                             return.seurat = FALSE)$RNA
+
+# Ensure matrix format
+avg_exp <- as.matrix(avg_exp)
+
+# View matrix: rows are genes, columns are cell types
+cat("Average expression matrix dimensions:\n")
+print(dim(avg_exp))
+cat("Column names (cell types):\n")
+print(colnames(avg_exp))
+
+# 3. Filter lowly expressed genes (max average log1p expression <= 0.1 across cell types)
+keep <- apply(avg_exp, 1, max) > 0.1
+avg_exp_filt <- avg_exp[keep, ]
+
+cat("Filtered matrix dimensions:\n")
+print(dim(avg_exp_filt))
+
+# 4. Calculate correlation matrices (Pearson and Spearman)
+cor_pearson  <- cor(avg_exp_filt, method = "pearson")
+cor_spearman <- cor(avg_exp_filt, method = "spearman")
+```
+
+## a, c. Mixed correlation plot
+
+(a) Pearson correlation with circles in the upper triangle and numeric coefficients in the lower triangle. (c) Same layout for Spearman correlation.
+
+```{r corrplot_mixed, echo=TRUE}
+# corrplot mixed plot (upper triangle circle, lower triangle number)
+corrplot.mixed(cor_pearson,
+               upper = "circle",
+               lower = "number",
+               tl.pos = "lt",
+               diag = "u",
+               tl.col = "black",
+               upper.col = cor_colors,
+               lower.col = "black",
+               number.cex = 1.2,
+               number.digits = 2,
+               mar = c(0, 0, 2, 0),
+               title = "Pearson correlation")
+
+corrplot.mixed(cor_spearman,
+               upper = "circle",
+               lower = "number",
+               tl.pos = "lt",
+               diag = "u",
+               tl.col = "black",
+               upper.col = cor_colors,
+               lower.col = "black",
+               number.cex = 1.2,
+               number.digits = 2,
+               mar = c(0, 0, 2, 0),
+               title = "Spearman correlation")
+```
+
+## b, d. Clustered heatmap
+
+(b) Clustered heatmap of the Pearson correlation matrix. (d) Clustered heatmap of the Spearman correlation matrix.
+
+```{r corr_heatmap, echo=TRUE}
+# pheatmap clustered heatmap with values
+pheatmap(cor_pearson,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         display_numbers = FALSE,
+         number_format = "%.2f",
+         fontsize_row = 10,
+         fontsize_col = 10,
+         border_color = NA,
+         color = cor_colors,
+         main = "Pearson correlation between cell types")
+
+pheatmap(cor_spearman,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         display_numbers = FALSE,
+         number_format = "%.2f",
+         fontsize_row = 10,
+         fontsize_col = 10,
+         border_color = NA,
+         color = cor_colors,
+         main = "Spearman correlation between cell types")
+```

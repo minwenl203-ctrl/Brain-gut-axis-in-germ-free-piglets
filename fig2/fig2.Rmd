@@ -1,0 +1,145 @@
+---
+title: "Figure 2. Marker genes and GO enrichment visualization per cell type (ClusterGVis)."
+date: "2026/9/16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# Clean workspace
+rm(list=ls())
+# Load setting and functions
+source("../script/stat_plot_functions.R")
+# Set output directory
+output_dir <- "./"
+```
+
+(a-c) For each cell type, marker genes of the groups GF_D0, GF_D30 and MMT_D30 were identified with `FindAllMarkers` (only positive markers, min.pct = 0.25, logfc.threshold = 0.25). (a) Line plot of cluster gene expression; (b) heatmap of the top 5 marker genes per group; (c) combined heatmap with GO Biological Process annotation and line plot (when `org.Ss.eg.db` is available). GO enrichment was performed with ClusterGVis::enrichCluster (pvalueCutoff = 0.5, top 3 terms per cluster).
+
+```{r load_data, echo=TRUE}
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+suppressPackageStartupMessages(library(ClusterGVis))
+
+if (!require("ComplexHeatmap", quietly = TRUE)) BiocManager::install("ComplexHeatmap")
+library(ComplexHeatmap)
+
+if (!require("jjAnno", quietly = TRUE)) devtools::install_github("junjunlab/jjAnno")
+library(jjAnno)
+
+input_rds <- "Brain_new.rds"  # adjust to your input file path
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+scobj <- readRDS(input_rds)
+
+stopifnot("group" %in% colnames(scobj@meta.data))
+
+celltypes <- unique(scobj@meta.data$manual_celltype)
+
+org.db.available <- FALSE
+if (require("org.Ss.eg.db", quietly = TRUE)) {
+  library(org.Ss.eg.db)
+  org.db <- org.Ss.eg.db
+  organism <- "ssc"
+  org.db.available <- TRUE
+}
+```
+
+```{r per_celltype, echo=TRUE, results='asis', fig.width=8}
+for (ct in celltypes) {
+  # Sanitize cell type name for folder name
+  ct_safe <- gsub("[^a-zA-Z0-9_]", "_", ct)
+  ct_dir <- file.path(output_dir, ct_safe)
+  dir.create(ct_dir, showWarnings = FALSE, recursive = TRUE)
+
+  scobj_sub <- subset(scobj, subset = manual_celltype == ct)
+
+  present_groups <- intersect(group_order, unique(scobj_sub@meta.data$group))
+  scobj_sub@meta.data$group <- factor(scobj_sub@meta.data$group, levels = present_groups)
+  Idents(scobj_sub) <- "group"
+
+  n_groups <- length(unique(scobj_sub@meta.data$group))
+  if (n_groups < 2) next
+
+  # Step 1: FindAllMarkers
+  markers.all <- tryCatch({
+    Seurat::FindAllMarkers(scobj_sub, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+  }, error = function(e) NULL)
+  if (is.null(markers.all) || nrow(markers.all) == 0) next
+  write.csv(markers.all, file.path(ct_dir, "all_marker_genes.csv"), row.names = FALSE)
+
+  # Top 5 markers per cluster by avg_log2FC
+  markers <- markers.all %>% group_by(cluster) %>% top_n(n = 5, wt = avg_log2FC)
+  write.csv(as.data.frame(markers), file.path(ct_dir, "top5_marker_genes.csv"), row.names = FALSE)
+
+  # Step 2: Prepare visualization data and GO enrichment
+  st.data1 <- prepareDataFromscRNA(object = scobj_sub, diffData = markers, showAverage = TRUE)
+
+  enrich <- NULL
+  enrich.available <- FALSE
+  if (org.db.available) {
+    enrich <- tryCatch({
+      enrichCluster(object = st.data1, OrgDb = org.db, type = "BP", organism = organism, pvalueCutoff = 0.5, topn = 3, seed = 5201314)
+    }, error = function(e) NULL)
+    if (!is.null(enrich) && nrow(enrich) > 0) {
+      write.csv(enrich, file.path(ct_dir, "go_enrichment_results.csv"), row.names = FALSE)
+      enrich.available <- TRUE
+    } else {
+      enrich <- NULL
+    }
+  }
+
+  markGenes <- unique(markers$gene)
+  n_marker_genes <- length(markGenes)
+
+  # Adaptive figure and font sizes
+  hm_height <- max(6, n_marker_genes * 0.45 + 2)
+  hm_width  <- max(8, n_groups * 2.5 + 6)
+  line_width  <- max(8, n_marker_genes * 0.25 + 6)
+  line_height <- max(5, n_marker_genes * 0.12 + 4)
+  both_width  <- max(10, n_groups * 3 + 7)
+  both_height <- if (enrich.available) max(6, n_marker_genes * 0.40 + 3) else max(5, n_marker_genes * 0.35 + 2)
+  row_fontsize <- max(5, 10 - n_marker_genes * 0.2)
+  col_fontsize <- max(6, 10 - n_groups * 0.5)
+
+  # Markdown section header for the current cell type
+  cat("\n##", ct, "\n\n")
+
+  # a. Line plot of cluster gene expression
+  cat("\n### a. Line plot\n\n")
+  print(visCluster(object = st.data1, plot.type = "line"))
+
+  # b. Heatmap
+  cat("\n### b. Heatmap\n\n")
+  print(visCluster(object = st.data1, plot.type = "heatmap", column_names_rot = 45, markGenes = markGenes, cluster.order = c(1:n_groups), row_names_gp = grid::gpar(fontsize = row_fontsize), column_names_gp = grid::gpar(fontsize = col_fontsize)))
+
+  # c. Combined plot: heatmap + GO annotation + line plot
+  cat("\n### c. Combined plot (heatmap + GO annotation + line plot)\n\n")
+  plot_both <- function(use_enrich = FALSE) {
+    if (use_enrich) {
+      n_enrich_terms <- nrow(enrich)
+      go_colors <- rep(jjAnno::useMyCol("stallion", n = n_groups), each = 3)[1:n_enrich_terms]
+      visCluster(object = st.data1, plot.type = "both", column_names_rot = 45, show_row_dend = FALSE, markGenes = markGenes, markGenes.side = "left", annoTerm.data = enrich, line.side = "left", cluster.order = c(1:n_groups), go.col = go_colors, add.bar = TRUE, row_names_gp = grid::gpar(fontsize = row_fontsize), column_names_gp = grid::gpar(fontsize = col_fontsize))
+    } else {
+      visCluster(object = st.data1, plot.type = "both", column_names_rot = 45, show_row_dend = FALSE, markGenes = markGenes, markGenes.side = "left", line.side = "left", cluster.order = c(1:n_groups), add.bar = TRUE, row_names_gp = grid::gpar(fontsize = row_fontsize), column_names_gp = grid::gpar(fontsize = col_fontsize))
+    }
+  }
+
+  if (enrich.available) {
+    # Fall back to a plot without GO annotation if enrichment plot fails
+    result <- tryCatch({
+      print(plot_both(use_enrich = TRUE))
+      "enrich_ok"
+    }, error = function(e) "fallback")
+
+    if (result == "fallback") {
+      print(plot_both(use_enrich = FALSE))
+    }
+  } else {
+    print(plot_both(use_enrich = FALSE))
+  }
+}
+```
+
+The loop above repeats the analysis for every cell type in `manual_celltype`; each iteration renders panels a, b and c and writes `all_marker_genes.csv`, `top5_marker_genes.csv` and (when available) `go_enrichment_results.csv` into one subfolder per cell type.

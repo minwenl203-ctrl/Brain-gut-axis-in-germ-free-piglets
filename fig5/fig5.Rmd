@@ -1,0 +1,139 @@
+---
+title: "Figure 5. DEG counts across intestinal segments (bulk RNA-seq, edgeR)."
+date: "2026/9/16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# Clean workspace
+rm(list=ls())
+# Load setting and functions
+source("../script/stat_plot_functions.R")
+# Set output directory
+output_dir <- "./"
+```
+
+(a) Numbers of up- and down-regulated genes per intestinal segment for the comparisons D30C vs D0 (control mice, day 30 vs day 0) and D30T vs D30C (fecal microbiota transplant mice, day 30 vs control day 30). Differential expression was called with edgeR exactTest on rounded TPM values, using the thresholds FDR < 0.05 and |log2FC| > 1. Bars above the x-axis are up-regulated genes, bars below are down-regulated genes; colors distinguish the two comparisons. Results are written to `DEG_summary_by_segment.csv` (summary) and `DEG_table_perSegment.csv` (full table).
+
+```{r DEG_count, echo=TRUE}
+suppressPackageStartupMessages({
+  library(edgeR)
+  library(ggplot2)
+})
+
+# Note: put the input file in the working directory, or adjust the path below
+input_file <- "gut_bulkRNA_seq_TPM_20260801.csv"
+
+FC_CUT  <- 1      # |log2FC| > 1
+FDR_CUT <- 0.05   # FDR < 0.05
+
+d <- read.csv(input_file, row.names = 1, check.names = FALSE)
+
+# Remove fully duplicated column (D30C_IleMuco_B1_1 is identical to D30C_IleMuco_B1)
+d <- d[, colnames(d) != "D30C_IleMuco_B1_1", drop = FALSE]
+
+# Segment -> sample-name prefixes per time point (D0 and D30C/D30T naming differ: jejunum/JejMuco, ileum/IleMuco)
+seg_map <- data.frame(
+  segment = c("Duodenum", "Jejunum", "Ileum", "Cecum", "Colon"),
+  D0      = c("duo", "jejunum", "ileum", "cecum", "colon"),
+  D30C    = c("duo", "JejMuco", "IleMuco", "cecum", "colon"),
+  D30T    = c("duo", "JejMuco", "IleMuco", "cecum", "colon"),
+  stringsAsFactors = FALSE
+)
+
+# Comparisons: ref = reference group, trt = treatment group; logFC = log2(trt / ref)
+comps <- list(
+  "D30C vs D0"  = c(ref = "D0",   trt = "D30C"),
+  "D30T vs D30C" = c(ref = "D30C", trt = "D30T")
+)
+
+all_res <- list()
+for (cn in names(comps)) {
+  ref <- comps[[cn]][["ref"]]
+  trt <- comps[[cn]][["trt"]]
+  for (i in seq_len(nrow(seg_map))) {
+    seg   <- seg_map$segment[i]
+    c_ref <- grep(paste0("^", ref, "_", seg_map[[ref]][i], "_"), colnames(d), value = TRUE)
+    c_trt <- grep(paste0("^", trt, "_", seg_map[[trt]][i], "_"), colnames(d), value = TRUE)
+    sub   <- d[, c(c_ref, c_trt)]
+    grp   <- factor(c(rep(ref, length(c_ref)), rep(trt, length(c_trt))),
+                    levels = c(ref, trt))
+
+    # Rounded TPM used as count-like input for edgeR
+    y <- DGEList(counts = round(sub), group = grp)
+    keep <- filterByExpr(y)
+    y <- y[keep, , keep.lib.sizes = FALSE]
+    y <- calcNormFactors(y)
+    y <- estimateDisp(y)
+    et <- exactTest(y)               # logFC = log2(trt / ref)
+    tt <- topTags(et, n = Inf)$table
+    tt$gene       <- rownames(tt)
+    tt$comparison <- cn
+    tt$segment    <- seg
+    tt$direction  <- ifelse(tt$FDR < FDR_CUT & tt$logFC >  FC_CUT, "Up",
+                     ifelse(tt$FDR < FDR_CUT & tt$logFC < -FC_CUT, "Down", "NS"))
+    all_res[[paste(cn, seg)]] <- tt
+
+    cat(sprintf("%-14s %-9s | %s n=%d | %s n=%d | tested=%d | Up=%d | Down=%d\n",
+                cn, seg, ref, length(c_ref), trt, length(c_trt), nrow(tt),
+                sum(tt$direction == "Up"), sum(tt$direction == "Down")))
+  }
+}
+
+res <- do.call(rbind, all_res)
+res$segment    <- factor(res$segment, levels = seg_map$segment)
+res$comparison <- factor(res$comparison, levels = names(comps))
+
+# ---- Summary statistics ----
+sig <- res[res$direction != "NS", ]
+tb  <- table(sig$comparison, sig$segment, sig$direction)
+summ <- expand.grid(comparison = levels(res$comparison), segment = levels(res$segment))
+summ$Up    <- as.integer(tb[, , "Up"])
+summ$Down  <- as.integer(tb[, , "Down"])
+summ$Total <- summ$Up + summ$Down
+
+write.csv(summ, file.path(output_dir, "DEG_summary_by_segment.csv"), row.names = FALSE)
+write.csv(res,  file.path(output_dir, "DEG_table_perSegment.csv"), row.names = FALSE)
+
+# ---- Bidirectional bar plot: above = up-regulated, below = down-regulated; color = comparison ----
+plt <- data.frame(
+  comparison = summ$comparison,
+  segment    = summ$segment,
+  dir        = rep(c("Up", "Down"), each = nrow(summ)),
+  n          = c(summ$Up, summ$Down)
+)
+plt$value <- ifelse(plt$dir == "Up", plt$n, -plt$n)
+plt$x     <- as.numeric(plt$segment) +
+             ifelse(plt$comparison == names(comps)[1], -0.21, 0.21)
+
+p <- ggplot(plt, aes(x = x, y = value, fill = comparison)) +
+  # Axes at the bottom layer: draw axis lines and zero line before the bars
+  # limits must cover all bars (leftmost bar edge 0.59, rightmost bar edge 5.41), otherwise bars are clipped
+  geom_segment(aes(x = 0.5, xend = 5.5, y = -Inf, yend = -Inf),
+               colour = "black", linewidth = 0.4) +
+  geom_segment(aes(x = 0.5, xend = 0.5, y = -Inf, yend = Inf),
+               colour = "black", linewidth = 0.4) +
+  geom_hline(yintercept = 0, colour = "black", linewidth = 0.4) +
+  geom_col(width = 0.4, colour = NA) +
+  scale_fill_manual(values = c("D30C vs D0" = "#6674c5ff", "D30T vs D30C" = "#9fc5a6ff")) +
+  scale_y_continuous(labels = abs, expand = expansion(mult = c(0.15, 0.15))) +
+  scale_x_continuous(breaks = seq_along(levels(plt$segment)),
+                     labels = levels(plt$segment),
+                     limits = c(0.5, 5.5)) +
+  labs(x = NULL, y = "Number of DEGs", fill = NULL,
+       title = "DEG counts by intestinal segment",
+       subtitle = expression("edgeR exactTest, FDR < 0.05 & " * "|" * log[2] * "FC| > 1")) +
+  theme_classic(base_size = 14) +
+  theme(axis.line        = element_blank(),   # axis lines drawn by bottom geom_segment layers
+        plot.title    = element_text(face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5),
+        legend.position = "top",
+        axis.text.x   = element_text(size = 12, face = "bold"),
+        axis.title.y  = element_text(size = 13))
+
+print(p)
+
+cat("\n===== Summary (FDR<0.05 & |log2FC|>1) =====\n")
+print(summ)
+```
